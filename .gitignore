@@ -1,1 +1,3 @@
 PRD.md
+__pycache__/
+*.py[cod]

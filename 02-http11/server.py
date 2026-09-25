@@ -38,40 +38,43 @@ def parse_query(query: str) -> dict:
     return params
 
 
-def build_response(status_code: int, status_text: str, body: str) -> bytes:
+def build_response(status_code: int, status_text: str, body: str, close: bool = False) -> bytes:
     body_bytes = body.encode("utf-8")
+    conn_header = "Connection: close\r\n" if close else ""
     head = (
         f"HTTP/1.1 {status_code} {status_text}\r\n"
         f"Content-Type: text/plain\r\n"
         f"Content-Length: {len(body_bytes)}\r\n"
-        f"\r\n"
+        f"{conn_header}\r\n"
     )
     return head.encode("utf-8") + body_bytes
 
 
-def handle_request(method: str, path: str, query: str, headers: dict) -> bytes:
+def handle_request(method: str, path: str, query: str, headers: dict, close: bool = False) -> bytes:
     if method != "GET":
-        return build_response(405, "Method Not Allowed", "only GET is supported")
+        return build_response(405, "Method Not Allowed", "only GET is supported", close=close)
     if "host" not in headers:
-        return build_response(400, "Bad Request", "missing Host header")
+        return build_response(400, "Bad Request", "missing Host header", close=close)
     if path not in OPERATIONS:
-        return build_response(404, "Not Found", f"no such operation: {path}")
+        return build_response(404, "Not Found", f"no such operation: {path}", close=close)
 
     params = parse_query(query)
     if "a" not in params or "b" not in params or params["a"] == "" or params["b"] == "":
-        return build_response(400, "Bad Request", "missing parameter a or b")
+        return build_response(400, "Bad Request", "missing parameter a or b", close=close)
 
     try:
         a = int(params["a"])
         b = int(params["b"])
     except ValueError:
-        return build_response(400, "Bad Request", "a and b must be integers")
+        return build_response(400, "Bad Request", "a and b must be integers", close=close)
 
     if path == "/div" and b == 0:
-        return build_response(400, "Bad Request", "division by zero")
+        return build_response(400, "Bad Request", "division by zero", close=close)
 
     result = OPERATIONS[path](a, b)
-    return build_response(200, "OK", str(result))
+    if isinstance(result, float) and result.is_integer():
+        result = int(result)
+    return build_response(200, "OK", str(result), close=close)
 
 
 def handle_connection(conn: socket.socket):
@@ -101,12 +104,15 @@ def handle_connection(conn: socket.socket):
 
         try:
             method, path, query, headers = parse_request(request_bytes)
-            response = handle_request(method, path, query, headers)
+            should_close = headers.get("connection", "").lower() == "close"
+            response = handle_request(method, path, query, headers, close=should_close)
         except Exception:
-            response = build_response(400, "Bad Request", "malformed request")
+            should_close = True
+            response = build_response(400, "Bad Request", "malformed request", close=True)
 
-        conn.send(response)
-        # loop back to top WITHOUT closing conn -> ready for next request
+        conn.sendall(response)
+        if should_close:
+            break
 
     conn.close()
 
