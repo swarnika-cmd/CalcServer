@@ -6,7 +6,7 @@ OPERATIONS = {
     "/add": lambda a, b: a + b,
     "/sub": lambda a, b: a - b,
     "/mul": lambda a, b: a * b,
-    "/div": lambda a, b: a / b,   # ZeroDivisionError handled separately below
+    "/div": lambda a, b: a / b,
 }
 
 
@@ -25,12 +25,10 @@ def parse_request(raw: bytes):
         headers[key.strip().lower()] = value.strip()
 
     path, _, query = target.partition("?")
-
     return method, path, query, headers
 
 
 def parse_query(query: str) -> dict:
-    """'a=3&b=4' -> {'a': '3', 'b': '4'}. Missing/empty query -> {}."""
     params = {}
     if not query:
         return params
@@ -52,19 +50,13 @@ def build_response(status_code: int, status_text: str, body: str) -> bytes:
 
 
 def handle_request(method: str, path: str, query: str, headers: dict) -> bytes:
-    # 1. Method check
     if method != "GET":
         return build_response(405, "Method Not Allowed", "only GET is supported")
-
-    # 2. Host header required (HTTP/1.1 spec, and a common grader check)
     if "host" not in headers:
         return build_response(400, "Bad Request", "missing Host header")
-
-    # 3. Unknown route
     if path not in OPERATIONS:
         return build_response(404, "Not Found", f"no such operation: {path}")
 
-    # 4. Parse params
     params = parse_query(query)
     if "a" not in params or "b" not in params or params["a"] == "" or params["b"] == "":
         return build_response(400, "Bad Request", "missing parameter a or b")
@@ -75,13 +67,48 @@ def handle_request(method: str, path: str, query: str, headers: dict) -> bytes:
     except ValueError:
         return build_response(400, "Bad Request", "a and b must be integers")
 
-    # 5. Division by zero
     if path == "/div" and b == 0:
         return build_response(400, "Bad Request", "division by zero")
 
-    # 6. Compute
     result = OPERATIONS[path](a, b)
     return build_response(200, "OK", str(result))
+
+
+def handle_connection(conn: socket.socket):
+    """
+    Serve MULTIPLE requests off the same connection, in a loop.
+    buffer holds bytes we've read but not yet turned into a full request.
+    """
+    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    buffer = b""
+
+    while True:
+        # 1. Do we already have a full request sitting in buffer from last read?
+        end = buffer.find(b"\r\n\r\n")
+
+        if end == -1:
+            # No complete request yet -> read more bytes and append
+            chunk = conn.recv(4096)
+            if chunk == b"":
+                # Client closed the connection. Nothing more to do.
+                break
+            buffer += chunk
+            continue  # go re-check buffer for a complete request
+
+        # 2. We have one full request: buffer[0:end+4] (request line+headers+\r\n\r\n)
+        request_bytes = buffer[:end + 4]
+        buffer = buffer[end + 4:]   # keep leftover bytes for the NEXT request
+
+        try:
+            method, path, query, headers = parse_request(request_bytes)
+            response = handle_request(method, path, query, headers)
+        except Exception:
+            response = build_response(400, "Bad Request", "malformed request")
+
+        conn.send(response)
+        # loop back to top WITHOUT closing conn -> ready for next request
+
+    conn.close()
 
 
 def main():
@@ -93,13 +120,7 @@ def main():
 
     while True:
         conn, addr = server.accept()
-        data = conn.recv(4096)
-
-        method, path, query, headers = parse_request(data)
-        response = handle_request(method, path, query, headers)
-
-        conn.send(response)
-        conn.close()
+        handle_connection(conn)
 
 
 if __name__ == "__main__":
